@@ -52,10 +52,11 @@ async function apiFor(response) {
     headers: { get: () => 'text/event-stream' }, body: { getReader: () => reader },
     ...response }
   let requests = 0
+  const bodies = []
   const api = await moduleFor(source('ai-interview-frontend/src/api/interview.js'),
-    { fetch: async () => { requests++; return output } },
-    { './request': { default: {} }, '../stores/auth': { useAuthStore: () => auth } })
-  return { api, chunks, requests: () => requests }
+    { fetch: async (url, options) => { requests++; bodies.push(JSON.parse(options.body)); return output } },
+    { './request': { default: { post: async (url, body) => bodies.push(body) } }, '../stores/auth': { useAuthStore: () => auth } })
+  return { api, chunks, bodies, requests: () => requests }
 }
 
 test('SSE handles split chunks and exactly one success', async () => {
@@ -63,21 +64,21 @@ test('SSE handles split chunks and exactly one success', async () => {
   chunks.push('data: {"type":"chunk","content":"hello"}\n\n',
     'data: {"type":"do', 'ne","score":7}\n\n')
   const received = []; let done = 0
-  await api.submitAnswerStream(1, 'synthetic', x => received.push(x), () => done++)
+  await api.submitAnswerStream(1, 'synthetic', 0, x => received.push(x), () => done++)
   assert.deepEqual(received, ['hello']); assert.equal(done, 1); assert.equal(requests(), 1)
 })
 
 test('SSE rejects HTTP 401/500 before reading a stream', async () => {
   for (const status of [401, 500]) {
     const { api } = await apiFor({ ok: false, status, body: null })
-    await assert.rejects(api.submitAnswerStream(1, 'synthetic', () => {}, () => {}), /HTTP/)
+    await assert.rejects(api.submitAnswerStream(1, 'synthetic', 0, () => {}, () => {}), /HTTP/)
   }
 })
 
 test('SSE rejects absent body or incorrect content type', async () => {
   for (const response of [{ body: null }, { headers: { get: () => 'application/json' } }]) {
     const { api } = await apiFor(response)
-    await assert.rejects(api.submitAnswerStream(1, 'synthetic', () => {}, () => {}))
+    await assert.rejects(api.submitAnswerStream(1, 'synthetic', 0, () => {}, () => {}))
   }
 })
 
@@ -86,7 +87,7 @@ test('SSE rejects EOF without done and malformed events', async () => {
     const { api, chunks, requests } = await apiFor()
     if (text) chunks.push(text)
     let done = 0
-    await assert.rejects(api.submitAnswerStream(1, 'synthetic', () => {}, () => done++))
+    await assert.rejects(api.submitAnswerStream(1, 'synthetic', 0, () => {}, () => done++))
     assert.equal(done, 0); assert.equal(requests(), 1)
   }
 })
@@ -94,11 +95,11 @@ test('SSE rejects EOF without done and malformed events', async () => {
 test('SSE propagates read failures and explicit retry safety', async () => {
   const { api, chunks } = await apiFor()
   chunks.push(new Error('synthetic disconnect'))
-  await assert.rejects(api.submitAnswerStream(1, 'synthetic', () => {}, () => {}), /disconnect/)
+  await assert.rejects(api.submitAnswerStream(1, 'synthetic', 0, () => {}, () => {}), /disconnect/)
   for (const safe of [false, true]) {
     const fixture = await apiFor()
     fixture.chunks.push(`data: ${JSON.stringify({ type: 'error', content: 'synthetic', retry_safe: safe })}\n\n`)
-    await assert.rejects(fixture.api.submitAnswerStream(1, 'synthetic', () => {}, () => {}),
+    await assert.rejects(fixture.api.submitAnswerStream(1, 'synthetic', 0, () => {}, () => {}),
       error => error.retrySafe === safe)
   }
 })
@@ -106,7 +107,7 @@ test('SSE propagates read failures and explicit retry safety', async () => {
 async function viewFor(api = {}) {
   const file = source('ai-interview-frontend/src/views/Interview.vue')
   const script = file.match(/<script setup>([\s\S]*?)<\/script>/)[1]
-  const view = await moduleFor(script + '\nexport { handleSubmit, checkSubmission, renderContent, messages, answer, thinking, submissionUncertain, currentIndex, finished, loadInterviewMetadata };',
+  const view = await moduleFor(script + '\nexport { handleSubmit, checkSubmission, retrySubmission, renderContent, messages, answer, thinking, submissionUncertain, currentIndex, finished, loadInterviewMetadata };',
     { console: { error() {} } }, {
       vue: { ref, computed: fn => ({ get value() { return fn() } }),
         onMounted() {}, nextTick: fn => fn?.() },
@@ -159,6 +160,60 @@ test('Committed final answer is confirmed by report lookup', async () => {
     getReport: async () => { reports++; return {} } })
   view.answer.value = 'Synthetic answer'; await view.handleSubmit()
   assert.equal(view.finished.value, true); assert.equal(reports, 1)
+})
+
+test('Both answer transports send the explicit expected question identity', async () => {
+  const { api, chunks, bodies } = await apiFor()
+  await api.submitAnswer(1, 'synthetic', 2)
+  chunks.push('data: {"type":"done","question_index":2}\n\n')
+  await api.submitAnswerStream(1, 'synthetic', 2, () => {}, () => {})
+  assert.equal(bodies.length, 2)
+  for (const body of bodies) {
+    assert.equal(body.answer, 'synthetic')
+    assert.equal(body.expected_question_index, 2)
+  }
+})
+
+test('Manual retry keeps the original index after an uncertain disconnect', async () => {
+  const indices = []
+  const view = await viewFor({ submitAnswerStream: async (id, answer, index) => {
+    indices.push(index); throw new Error('disconnect')
+  } })
+  view.currentIndex.value = 1
+  view.answer.value = 'Synthetic answer'
+  await view.handleSubmit()
+  view.currentIndex.value = 2
+  await view.retrySubmission()
+  assert.deepEqual(indices, [1, 1])
+  assert.equal(view.submissionUncertain.value, true)
+})
+
+test('Another tab committed this question: reconciliation follows the server answer', async () => {
+  const view = await viewFor({ submitAnswerStream: async () => { throw new Error('conflict') },
+    getMessages: async () => [{ role: 'candidate', question_index: 0, content: 'Other tab answer', score: 7 },
+      { role: 'interviewer', question_index: 1, content: 'Q2' }] })
+  view.answer.value = 'Synthetic answer'
+  await view.handleSubmit()
+  assert.equal(view.submissionUncertain.value, false)
+  assert.equal(view.currentIndex.value, 1)
+  assert.equal(view.answer.value, '')
+})
+
+test('Reconciliation refreshes completion after another tab answered multiple questions', async () => {
+  let metadataReads = 0
+  let reports = 0
+  const view = await viewFor({ submitAnswerStream: async () => { throw new Error('conflict') },
+    getInterviews: async () => ({ items: [{ interview_id: 1, total_questions: 3,
+      status: ++metadataReads === 1 ? 'in_progress' : 'completed' }] }),
+    getMessages: async () => [{ role: 'candidate', question_index: 0, content: 'Other tab', score: 7 },
+      { role: 'interviewer', question_index: 1, content: 'Q2' },
+      { role: 'interviewer', question_index: 2, content: 'Q3' }],
+    getReport: async () => { reports++; return {} } })
+  view.answer.value = 'Synthetic answer'
+  await view.handleSubmit()
+  assert.equal(view.finished.value, true)
+  assert.equal(view.submissionUncertain.value, false)
+  assert.equal(reports, 1)
 })
 
 for (const side of ['ai-interview-admin', 'ai-interview-frontend']) {

@@ -2,6 +2,8 @@
 import ast
 import asyncio
 from contextlib import ExitStack, asynccontextmanager
+import time
+from sqlalchemy.exc import DBAPIError
 from datetime import datetime, timedelta, UTC
 import hashlib
 import json
@@ -86,6 +88,7 @@ class APIException(Exception):
     def __init__(self, status_code=400, message="", **kwargs):
         super().__init__(message)
         self.status_code = status_code
+        self.detail = message
 
 
 def source_class(relative, name, namespace):
@@ -99,7 +102,7 @@ def namespace():
     from typing import Dict, Optional, List
     from decimal import Decimal
     import math
-    return dict(Dict=Dict, Optional=Optional, List=List, Decimal=Decimal, math=math,
+    return dict(asyncio=asyncio, asynccontextmanager=asynccontextmanager, time=time, DBAPIError=DBAPIError, Dict=Dict, Optional=Optional, List=List, Decimal=Decimal, math=math,
                 datetime=datetime, timedelta=timedelta, UTC=UTC, hashlib=hashlib,
                 json=json, logging=logging, logger=logging.getLogger("a2.test"),
                 AsyncSession=object, select=select, update=update, User=User,

@@ -47,7 +47,7 @@ class InterviewScoreTests(IsolatedCase):
     def events(self, service, db):
         async def collect():
             return [json.loads(event.removeprefix("data: "))
-                    async for event in service.submit_answer_stream(db, 17, 1, "Synthetic answer")]
+                    async for event in service.submit_answer_stream(db, 17, 1, "Synthetic answer", 0)]
         return self.run_async(collect())
 
     def assert_rolled_back(self, db, interview):
@@ -72,7 +72,7 @@ class InterviewScoreTests(IsolatedCase):
                         self.assertNotIn("done", [e["type"] for e in events])
                     else:
                         with self.assertRaises(APIException):
-                            self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer"))
+                            self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer", 0))
                     self.assert_rolled_back(db, interview)
 
     def test_stream_missing_malformed_and_multiple_scores_fail(self):
@@ -87,7 +87,7 @@ class InterviewScoreTests(IsolatedCase):
         service, db, interview, ai = self.fixture()
         ai.evaluate_answer.return_value = {"feedback": "No score"}
         with self.assertRaises(APIException):
-            self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer"))
+            self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer", 0))
         self.assert_rolled_back(db, interview)
 
     def test_provider_failure_rolls_back_both_methods(self):
@@ -97,7 +97,7 @@ class InterviewScoreTests(IsolatedCase):
                 self.assertEqual(self.events(service, db)[-1]["type"], "error")
             else:
                 with self.assertRaises(RuntimeError):
-                    self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer"))
+                    self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer", 0))
             self.assert_rolled_back(db, interview)
 
     def test_report_failure_cannot_commit_completed_interview(self):
@@ -107,7 +107,7 @@ class InterviewScoreTests(IsolatedCase):
                 self.assertEqual(self.events(service, db)[-1]["type"], "error")
             else:
                 with self.assertRaises(RuntimeError):
-                    self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer"))
+                    self.run_async(service.submit_answer(db, 17, 1, "Synthetic answer", 0))
             self.assert_rolled_back(db, interview)
 
     def test_valid_zero_ten_and_normal_scores_commit(self):
@@ -115,7 +115,7 @@ class InterviewScoreTests(IsolatedCase):
             for streaming in (False, True):
                 service, db, interview, _ = self.fixture(score=value)
                 result = self.events(service, db)[-1] if streaming else self.run_async(
-                    service.submit_answer(db, 17, 1, "Synthetic answer"))
+                    service.submit_answer(db, 17, 1, "Synthetic answer", 0))
                 self.assertEqual(result["score"], value)
                 self.assertEqual(db.commits, 1)
                 self.assertEqual(db.rollbacks, 0)
@@ -134,7 +134,7 @@ class InterviewScoreTests(IsolatedCase):
         service, db, interview, _ = self.fixture()
 
         async def disconnect():
-            generator = service.submit_answer_stream(db, 17, 1, "Synthetic answer")
+            generator = service.submit_answer_stream(db, 17, 1, "Synthetic answer", 0)
             await anext(generator)
             await generator.aclose()
 
@@ -145,7 +145,7 @@ class InterviewScoreTests(IsolatedCase):
         service, db, interview, _ = self.fixture()
 
         async def disconnect():
-            generator = service.submit_answer_stream(db, 17, 1, "Synthetic answer")
+            generator = service.submit_answer_stream(db, 17, 1, "Synthetic answer", 0)
             async for event in generator:
                 if json.loads(event.removeprefix("data: "))["type"] == "done":
                     break

@@ -4,11 +4,11 @@ export function startInterview(data) {
   return api.post('/interviews/start', data)
 }
 
-export function submitAnswer(interviewId, answer) {
-  return api.post(`/interviews/${interviewId}/answer`, { answer })
+export function submitAnswer(interviewId, answer, expectedQuestionIndex) {
+  return api.post(`/interviews/${interviewId}/answer`, { answer, expected_question_index: expectedQuestionIndex })
 }
 
-export async function submitAnswerStream(interviewId, answer, onChunk, onDone) {
+export async function submitAnswerStream(interviewId, answer, expectedQuestionIndex, onChunk, onDone) {
   const authStore = (await import('../stores/auth')).useAuthStore()
   const response = await fetch(`/api/v1/interviews/${interviewId}/answer/stream`, {
     method: 'POST',
@@ -16,7 +16,7 @@ export async function submitAnswerStream(interviewId, answer, onChunk, onDone) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${authStore.token}`
     },
-    body: JSON.stringify({ answer })
+    body: JSON.stringify({ answer, expected_question_index: expectedQuestionIndex })
   })
 
   if (!response.ok) throw new Error(`提交失败（HTTP ${response.status}），请核对服务器记录`)
@@ -41,11 +41,11 @@ export async function submitAnswerStream(interviewId, answer, onChunk, onDone) {
         else if (data.type === 'done') {
           receivedDone = true
           onDone(data)
-          await reader.cancel().catch(() => {})
           return
         } else if (data.type === 'error') {
           const error = new Error(data.content || '评估失败')
           error.retrySafe = data.retry_safe === true
+          error.code = data.code
           throw error
         }
       }
@@ -53,6 +53,7 @@ export async function submitAnswerStream(interviewId, answer, onChunk, onDone) {
     }
     if (!receivedDone) throw new Error('事件流提前结束，提交结果未确认')
   } finally {
+    await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
 }

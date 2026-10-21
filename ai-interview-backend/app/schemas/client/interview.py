@@ -18,6 +18,7 @@ class InterviewStartResponse(BaseSchema):
 
 
 class AnswerSubmit(BaseSchema):
+    expected_question_index: int = Field(..., ge=0, strict=True)
     answer: str = Field(..., min_length=1, max_length=5000)
 
 

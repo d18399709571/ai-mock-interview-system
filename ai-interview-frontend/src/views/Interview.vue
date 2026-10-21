@@ -108,6 +108,7 @@
     <div v-if="submissionUncertain" class="input-area">
       <span>提交结果未确认，请核对记录，勿重复提交。</span>
       <button @click="checkSubmission" :disabled="thinking">核对服务器结果</button>
+      <button @click="retrySubmission" :disabled="thinking">重试原题</button>
     </div>
     <div class="input-area" v-if="!preparing && !finished">
       <textarea v-model="answer" placeholder="输入你的回答..." @keydown.enter.exact.prevent="handleSubmit" @keydown.shift.enter.exact="null" :disabled="thinking || submissionUncertain || !totalQuestions" rows="3"></textarea>
@@ -243,10 +244,13 @@ async function reconcileSubmission(myAnswer, questionIndex, retrySafe = false) {
     if (!Array.isArray(rows)) throw new Error('消息格式无效')
     messages.value = rows.map(m => ({ ...m }))
     const saved = rows.find(m => m.role === 'candidate' && m.question_index === questionIndex
-      && m.content === myAnswer && m.score != null)
+      && m.score != null)
     if (saved) {
-      const nextQuestion = rows.find(m => m.role === 'interviewer' && m.question_index > questionIndex)
-      if (nextQuestion) currentIndex.value = nextQuestion.question_index
+      await loadInterviewMetadata()
+      if (!totalQuestions.value) throw new Error('面试状态尚未确认')
+      const nextQuestion = rows.filter(m => m.role === 'interviewer' && m.question_index > questionIndex).at(-1)
+      if (finished.value) await getReport(interviewId)
+      else if (nextQuestion) currentIndex.value = nextQuestion.question_index
       else {
         await getReport(interviewId)
         finished.value = true
@@ -280,10 +284,17 @@ async function checkSubmission() {
   }
 }
 
+async function retrySubmission() {
+  if (!pendingSubmission || thinking.value) return
+  // Keep the original question identity even if another tab advanced the interview.
+  submissionUncertain.value = false
+  await handleSubmit()
+}
+
 async function handleSubmit() {
   if (!answer.value.trim() || thinking.value || submissionUncertain.value || !totalQuestions.value) return
   const myAnswer = answer.value.trim()
-  const questionIndex = currentIndex.value
+  const questionIndex = pendingSubmission?.questionIndex ?? currentIndex.value
   answer.value = ''
   messages.value.push({ role: 'candidate', content: myAnswer })
   scrollToBottom()
@@ -292,7 +303,7 @@ async function handleSubmit() {
   let rawStreamText = ''  // 保存原始完整文本用于最终提取
 
   try {
-    await submitAnswerStream(interviewId, myAnswer,
+    await submitAnswerStream(interviewId, myAnswer, questionIndex,
       (chunk) => {
         rawStreamText += chunk
         // 实时过滤：去掉已完成的JSON块和正在构建中的JSON片段（以```json或裸{开头的尾部）
@@ -309,6 +320,8 @@ async function handleSubmit() {
         scrollToBottom()
       },
       (data) => {
+        pendingSubmission = null
+        submissionUncertain.value = false
         if (rawStreamText.trim()) {
           let displayText = rawStreamText
             .replace(/```json\s*\{[\s\S]*?\}\s*```/g, '')

@@ -41,7 +41,8 @@ async def submit_answer(
         db=db,
         user_id=current_user.id,
         interview_id=interview_id,
-        answer=data.answer
+        answer=data.answer,
+        expected_question_index=data.expected_question_index
     )
     return ApiResponse.success(data=result)
 
@@ -58,7 +59,8 @@ async def submit_answer_stream(
         db=db,
         user_id=current_user.id,
         interview_id=interview_id,
-        answer=data.answer
+        answer=data.answer,
+        expected_question_index=data.expected_question_index
     )
     return StreamingResponse(
         generator,

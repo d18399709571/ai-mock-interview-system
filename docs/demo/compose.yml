@@ -1,0 +1,77 @@
+# Explicit synthetic demonstration only. Run from an external runtime directory.
+name: ${DEMO_PROJECT:?Set a new unique DEMO_PROJECT}
+services:
+  postgres:
+    image: postgres:16.14-alpine3.23
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:?Set a synthetic database password}
+      POSTGRES_DB: demo
+    command: ["postgres", "-c", "idle_in_transaction_session_timeout=120000"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [isolated]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:8.8.0-alpine
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    volumes: [redisdata:/data]
+    networks: [isolated]
+  api:
+    image: ${DEMO_PROJECT:?}:api
+    build:
+      context: ../..
+      dockerfile: docs/demo/Dockerfile
+    working_dir: /runtime
+    environment:
+      INTERVIEW_DEMO: synthetic-only
+      SECRET_KEY: ${DEMO_SIGNING_KEY:?Set a synthetic signing key}
+      DEMO_PASSWORD: ${DEMO_ACCOUNT_PASSWORD:?Set a synthetic account password}
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:?}
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: demo
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      ENV: development
+      DEEPSEEK_API_KEY: demo-disabled
+      OPENAI_API_KEY: demo-disabled
+      PYTHONPATH: /runtime/backend:/source/docs/demo
+    command: ["python", "-B", "-m", "uvicorn", "demo_app:app", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"]
+    volumes:
+      - ../..:/source:ro
+      - ${DEMO_RUNTIME:?Use a new external runtime directory}:/runtime
+    networks: [isolated]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/demo-status', timeout=3)"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+  proxy:
+    # Docker Desktop does not publish ports from an internal-only network.
+    # Only this fixed reverse proxy joins the entry network; API/DB/Redis cannot egress.
+    image: nginx:1.30.6-alpine3.24
+    pull_policy: never
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["127.0.0.1:${DEMO_API_PORT:-18096}:8080"]
+    networks: [entry, isolated]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/demo-status"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+networks:
+  entry:
+  isolated:
+    internal: true
+volumes:
+  pgdata:
+  redisdata:
